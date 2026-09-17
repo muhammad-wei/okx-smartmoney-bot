@@ -1,6 +1,6 @@
 from smartmoney_bot.risk import RiskLimitExceeded, RiskLimits
 from smartmoney_bot.signals.smart_money import Position, PositionDelta, PositionTracker
-from smartmoney_bot.strategy.mirror import MirrorContext, mirror_delta, side_for
+from smartmoney_bot.strategy.mirror import MirrorContext, mirror_delta, pos_side_for, side_for
 
 
 def make_position(inst_id="BTC-USDT-SWAP", pos_side="long", size="1.0", avg_px="100"):
@@ -83,13 +83,44 @@ def test_side_for_close_long_is_sell():
     assert side_for(delta) == "sell"
 
 
+# -- pos_side_for ---------------------------------------------------------------
+# Regression tests for the bug found on a real live run: forwarding the SOURCE
+# trader's raw posSide into MY OWN order produced OKX error 51000 "Parameter
+# posSide error" on almost every mirrored trade, because my account's position
+# mode differed from theirs. pos_side_for must derive the value from MY OWN
+# account_pos_mode, never from delta.position.pos_side directly.
+
+def test_pos_side_for_net_mode_is_always_net_regardless_of_source_trader():
+    for pos_side in ("long", "short", "net"):
+        delta = PositionDelta("t1", "BTC-USDT-SWAP", "opened", make_position(pos_side=pos_side), None)
+        assert pos_side_for(delta, "net_mode") == "net"
+
+
+def test_pos_side_for_long_short_mode_open_long():
+    delta = PositionDelta("t1", "BTC-USDT-SWAP", "opened", make_position(pos_side="long"), None)
+    assert pos_side_for(delta, "long_short_mode") == "long"
+
+
+def test_pos_side_for_long_short_mode_open_short():
+    delta = PositionDelta("t1", "BTC-USDT-SWAP", "opened", make_position(pos_side="short"), None)
+    assert pos_side_for(delta, "long_short_mode") == "short"
+
+
+def test_pos_side_for_long_short_mode_close():
+    delta = PositionDelta("t1", "BTC-USDT-SWAP", "closed", None, make_position(pos_side="long"))
+    assert pos_side_for(delta, "long_short_mode") == "long"
+
+
 # -- mirror_delta ---------------------------------------------------------------
 
-def test_mirror_delta_opened_places_order_with_computed_size():
+def test_mirror_delta_opened_places_order_with_computed_size_and_net_pos_side():
     delta = PositionDelta("t1", "BTC-USDT-SWAP", "opened", make_position(pos_side="long"), None)
     adapter = FakeAdapter([], ticker_last="100")
     limits = RiskLimits(allocation_pct=0.02)
-    context = MirrorContext(equity_usd=10_000, open_position_count=0, allocated_to_trader_pct=0.0)
+    context = MirrorContext(
+        equity_usd=10_000, open_position_count=0, allocated_to_trader_pct=0.0,
+        account_pos_mode="net_mode",
+    )
 
     result = mirror_delta(adapter, delta, context, limits)
 
@@ -98,7 +129,25 @@ def test_mirror_delta_opened_places_order_with_computed_size():
     kind, kwargs = adapter.orders[0]
     assert kind == "place"
     assert kwargs["side"] == "buy"
+    assert kwargs["pos_side"] == "net"  # never the source trader's raw "long"
     assert float(kwargs["sz"]) == 2.0  # 2% of 10,000 / 100
+
+
+def test_mirror_delta_opened_uses_long_short_pos_side_in_that_account_mode():
+    delta = PositionDelta("t1", "BTC-USDT-SWAP", "opened", make_position(pos_side="short"), None)
+    adapter = FakeAdapter([], ticker_last="100")
+    limits = RiskLimits(allocation_pct=0.02)
+    context = MirrorContext(
+        equity_usd=10_000, open_position_count=0, allocated_to_trader_pct=0.0,
+        account_pos_mode="long_short_mode",
+    )
+
+    result = mirror_delta(adapter, delta, context, limits)
+
+    assert result["code"] == "0"
+    kind, kwargs = adapter.orders[0]
+    assert kwargs["side"] == "sell"
+    assert kwargs["pos_side"] == "short"
 
 
 def test_mirror_delta_closed_calls_close_position_not_place_order():

@@ -49,6 +49,17 @@ def get_equity_usd(adapter: OKXAdapter) -> float:
     return float(resp["data"][0].get("totalEq", 0) or 0)
 
 
+def get_account_pos_mode(adapter: OKXAdapter) -> str:
+    """This account's OWN position mode - never assume, and never copy a
+    source trader's posSide directly (their account's mode can differ from
+    ours; forwarding their raw value caused OKX error 51000 in practice)."""
+    resp = adapter.get_account_config()
+    rows = resp.get("data") or []
+    if resp.get("code") != "0" or not rows:
+        raise RuntimeError(f"account config call failed: {resp}")
+    return rows[0].get("posMode", "net_mode")
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     if args.command != "run":
@@ -91,6 +102,9 @@ def main(argv=None) -> int:
 
     print(f"Mode: {'LIVE' if args.live else 'SIMULATED'} | AI Builder Code: {ai_builder_code}")
 
+    account_pos_mode = get_account_pos_mode(adapter)
+    print(f"Account position mode: {account_pos_mode}")
+
     author_ids = select_traders(adapter, trader_filter)
     print(f"Tracking {len(author_ids)} traders: {author_ids}")
 
@@ -103,38 +117,56 @@ def main(argv=None) -> int:
     def open_position_count() -> int:
         return sum(len(v) for v in mirrored_notional_by_trader.values())
 
-    while True:
-        equity_usd = get_equity_usd(adapter)
-        for author_id in author_ids:
-            deltas = tracker.poll(adapter, author_id)
-            for delta in deltas:
-                print(f"[{author_id}] {delta.kind} {delta.inst_id}")
-                trader_notional = sum(mirrored_notional_by_trader[author_id].values())
-                context = MirrorContext(
-                    equity_usd=equity_usd,
-                    open_position_count=open_position_count(),
-                    allocated_to_trader_pct=(trader_notional / equity_usd) if equity_usd else 1.0,
-                )
+    try:
+        while True:
+            try:
+                equity_usd = get_equity_usd(adapter)
+            except Exception as exc:  # noqa: BLE001 - a network blip must not kill the process
+                print(f"Could not fetch account equity this cycle, skipping: {exc}")
+                time.sleep(args.poll_interval)
+                continue
+
+            for author_id in author_ids:
                 try:
-                    result = mirror_delta(adapter, delta, context, limits)
-                    print(f"  -> order result: {result}")
-                    if result.get("code") != "0":
-                        # OKX rejected the order (e.g. lot size, insufficient
-                        # margin) - the call succeeded, the trade didn't.
-                        # Bookkeeping must not record a position that was
-                        # never actually opened.
-                        print("  -> order rejected by OKX, not recording a position")
-                    elif delta.kind == "closed":
-                        mirrored_notional_by_trader[author_id].pop(delta.inst_id, None)
-                    else:
-                        mirrored_notional_by_trader[author_id][delta.inst_id] = (
-                            equity_usd * limits.allocation_pct
-                        )
-                except (RiskLimitExceeded, MirrorSkipped) as exc:
-                    print(f"  -> skipped: {exc}")
-                except Exception as exc:  # noqa: BLE001 - one bad delta must not kill the loop
-                    print(f"  -> unexpected error mirroring this delta, skipping it: {exc}")
-        time.sleep(args.poll_interval)
+                    deltas = tracker.poll(adapter, author_id)
+                except Exception as exc:  # noqa: BLE001 - same: one trader's poll failing
+                    print(f"[{author_id}] could not poll positions, skipping this cycle: {exc}")
+                    continue
+
+                for delta in deltas:
+                    print(f"[{author_id}] {delta.kind} {delta.inst_id}")
+                    trader_notional = sum(mirrored_notional_by_trader[author_id].values())
+                    context = MirrorContext(
+                        equity_usd=equity_usd,
+                        open_position_count=open_position_count(),
+                        allocated_to_trader_pct=(
+                            (trader_notional / equity_usd) if equity_usd else 1.0
+                        ),
+                        account_pos_mode=account_pos_mode,
+                    )
+                    try:
+                        result = mirror_delta(adapter, delta, context, limits)
+                        print(f"  -> order result: {result}")
+                        if result.get("code") != "0":
+                            # OKX rejected the order (e.g. lot size, insufficient
+                            # margin) - the call succeeded, the trade didn't.
+                            # Bookkeeping must not record a position that was
+                            # never actually opened.
+                            print("  -> order rejected by OKX, not recording a position")
+                        elif delta.kind == "closed":
+                            mirrored_notional_by_trader[author_id].pop(delta.inst_id, None)
+                        else:
+                            mirrored_notional_by_trader[author_id][delta.inst_id] = (
+                                equity_usd * limits.allocation_pct
+                            )
+                    except (RiskLimitExceeded, MirrorSkipped) as exc:
+                        print(f"  -> skipped: {exc}")
+                    except Exception as exc:  # noqa: BLE001 - one bad delta must not kill the loop
+                        print(f"  -> unexpected error mirroring this delta, skipping it: {exc}")
+            time.sleep(args.poll_interval)
+    except KeyboardInterrupt:
+        print("\nStopping (Ctrl+C) - no new mirrored trades will be placed.")
+        return 0
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ class MirrorContext:
     equity_usd: float
     open_position_count: int
     allocated_to_trader_pct: float
+    account_pos_mode: str = "net_mode"  # this account's OWN posMode - see pos_side_for
 
 
 def side_for(delta: PositionDelta) -> str:
@@ -33,6 +34,25 @@ def side_for(delta: PositionDelta) -> str:
         return "sell" if was_long else "buy"
     is_long = delta.position is not None and delta.position.pos_side in ("long", "net")
     return "buy" if is_long else "sell"
+
+
+def pos_side_for(delta: PositionDelta, account_pos_mode: str) -> str:
+    """The posSide to send on MY OWN order.
+
+    This must reflect MY account's position mode, never the source trader's
+    raw posSide - their account may be in long_short_mode while mine is in
+    net_mode (or vice versa), and forwarding their value verbatim produces
+    OKX error 51000 "Parameter posSide error" (confirmed live - almost every
+    order failed this way before this fix). In net_mode, OKX expects "net";
+    long/short is only a thing in long_short_mode, and there it must match
+    the direction being opened/closed, not the source trader's own mode."""
+    if account_pos_mode != "long_short_mode":
+        return "net"
+    if delta.kind == "closed":
+        was_long = delta.previous is not None and delta.previous.pos_side in ("long", "net")
+        return "long" if was_long else "short"
+    is_long = delta.position is not None and delta.position.pos_side in ("long", "net")
+    return "long" if is_long else "short"
 
 
 def _first_row(resp: dict, what: str, inst_id: str) -> dict:
@@ -49,7 +69,10 @@ def mirror_delta(adapter, delta: PositionDelta, context: MirrorContext,
     MirrorSkipped without calling place_order/close_position if the trade
     can't or shouldn't be placed - callers should catch both and continue."""
     if delta.kind == "closed":
-        return adapter.close_position(inst_id=delta.inst_id, mgn_mode=td_mode)
+        return adapter.close_position(
+            inst_id=delta.inst_id, mgn_mode=td_mode,
+            pos_side=pos_side_for(delta, context.account_pos_mode),
+        )
 
     ticker_row = _first_row(adapter.get_ticker(delta.inst_id), "ticker", delta.inst_id)
     mark_price = float(ticker_row["last"])
@@ -79,5 +102,5 @@ def mirror_delta(adapter, delta: PositionDelta, context: MirrorContext,
         side=side_for(delta),
         ord_type="market",
         sz=size,
-        pos_side=delta.position.pos_side if delta.position else None,
+        pos_side=pos_side_for(delta, context.account_pos_mode),
     )

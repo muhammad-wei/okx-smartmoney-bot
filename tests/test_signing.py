@@ -90,3 +90,61 @@ def test_ai_builder_code_format_validation():
             assert False, f"expected ValueError for {bad!r}"
         except ValueError:
             pass
+
+
+# -- GET retry ----------------------------------------------------------------
+# A dropped SSL connection (requests.exceptions.SSLError, a subclass of
+# ConnectionError) killed an earlier run entirely (see docs/SAFETY.md). These
+# lock in the fix: bounded retry on read-only GETs, and confirm it never
+# extends to order-producing POSTs, where retrying a lost response risks a
+# duplicate real-money order.
+
+def test_get_with_retry_recovers_after_transient_connection_errors():
+    calls = {"n": 0}
+
+    def flaky_get(url, headers=None, timeout=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise client.requests.exceptions.ConnectionError("dropped")
+        return FakeResponse({"code": "0", "data": [{"totalEq": "100"}]})
+
+    with patch.object(client, "time") as fake_time:
+        with patch.object(client.requests, "get", side_effect=flaky_get):
+            resp = client._get_with_retry("https://www.okx.com/x", {}, 10)
+
+    assert resp.json()["code"] == "0"
+    assert calls["n"] == 3
+    assert fake_time.sleep.call_count == 2  # slept between the 2 failed attempts only
+
+
+def test_get_with_retry_raises_after_exhausting_attempts():
+    def always_fails(url, headers=None, timeout=None):
+        raise client.requests.exceptions.ConnectionError("still dropped")
+
+    with patch.object(client, "time"):
+        with patch.object(client.requests, "get", side_effect=always_fails):
+            try:
+                client._get_with_retry("https://www.okx.com/x", {}, 10)
+                assert False, "expected ConnectionError to propagate"
+            except client.requests.exceptions.ConnectionError:
+                pass
+
+
+def test_place_order_never_retries_on_connection_error():
+    calls = {"n": 0}
+
+    def always_fails(url, headers=None, data=None, timeout=None):
+        calls["n"] += 1
+        raise client.requests.exceptions.ConnectionError("dropped")
+
+    with patch.object(client.requests, "post", side_effect=always_fails):
+        try:
+            client.place_order(
+                "https://www.okx.com", "k", "s", "p",
+                "BTC-USDT", "cash", "buy", "limit", "0.001",
+                ai_builder_code="ABC123",
+            )
+            assert False, "expected ConnectionError to propagate"
+        except client.requests.exceptions.ConnectionError:
+            pass
+    assert calls["n"] == 1  # never retried - a lost response must never risk a duplicate order

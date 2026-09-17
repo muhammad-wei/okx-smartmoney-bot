@@ -8,10 +8,14 @@ import hashlib
 import hmac
 import json
 import re
+import time
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 
 import requests
+
+GET_RETRY_ATTEMPTS = 3
+GET_RETRY_BACKOFF_SECONDS = 0.5
 
 PATH_ACCOUNT_BALANCE = "/api/v5/account/balance"
 PATH_ACCOUNT_CONFIG = "/api/v5/account/config"
@@ -32,6 +36,24 @@ def _sign(secret_key: str, timestamp: str, method: str, request_path: str, body:
     prehash = f"{timestamp}{method.upper()}{request_path}{body}"
     digest = hmac.new(secret_key.encode(), prehash.encode(), hashlib.sha256).digest()
     return base64.b64encode(digest).decode()
+
+
+def _get_with_retry(url: str, headers: dict, timeout: int) -> requests.Response:
+    """GET only - place_order/close_position never retry automatically, so a
+    lost response can never risk a duplicate real-money order. Retries a
+    short, bounded number of times on a dropped connection (ConnectionError,
+    which includes requests' SSLError - a dropped SSL connection killed an
+    earlier run entirely; see docs/SAFETY.md) or a timeout, so one blip
+    doesn't cost a full --poll-interval wait before the next attempt."""
+    last_exc = None
+    for attempt in range(GET_RETRY_ATTEMPTS):
+        try:
+            return requests.get(url, headers=headers, timeout=timeout)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            last_exc = exc
+            if attempt < GET_RETRY_ATTEMPTS - 1:
+                time.sleep(GET_RETRY_BACKOFF_SECONDS * (attempt + 1))
+    raise last_exc
 
 
 def _parse(resp: requests.Response) -> dict:
@@ -102,7 +124,7 @@ def get_account_balance(base_url: str, api_key: str, secret_key: str, passphrase
     request_path = _with_query(PATH_ACCOUNT_BALANCE, {"ccy": ccy})
     body = ""
     headers = _headers(api_key, secret_key, passphrase, "GET", request_path, body, simulated)
-    return _parse(requests.get(base_url + request_path, headers=headers, timeout=10))
+    return _parse(_get_with_retry(base_url + request_path, headers, 10))
 
 
 def get_account_config(base_url: str, api_key: str, secret_key: str, passphrase: str,
@@ -110,7 +132,7 @@ def get_account_config(base_url: str, api_key: str, secret_key: str, passphrase:
     request_path = PATH_ACCOUNT_CONFIG
     body = ""
     headers = _headers(api_key, secret_key, passphrase, "GET", request_path, body, simulated)
-    return _parse(requests.get(base_url + request_path, headers=headers, timeout=10))
+    return _parse(_get_with_retry(base_url + request_path, headers, 10))
 
 
 def get_positions(base_url: str, api_key: str, secret_key: str, passphrase: str,
@@ -122,15 +144,13 @@ def get_positions(base_url: str, api_key: str, secret_key: str, passphrase: str,
     })
     body = ""
     headers = _headers(api_key, secret_key, passphrase, "GET", request_path, body, simulated)
-    return _parse(requests.get(base_url + request_path, headers=headers, timeout=10))
+    return _parse(_get_with_retry(base_url + request_path, headers, 10))
 
 
 def get_ticker(base_url: str, inst_id: str, simulated: bool = True) -> dict:
     request_path = _with_query(PATH_MARKET_TICKER, {"instId": inst_id})
-    return _parse(requests.get(
-        base_url + request_path,
-        headers=_public_headers(simulated),
-        timeout=10,
+    return _parse(_get_with_retry(
+        base_url + request_path, _public_headers(simulated), 10,
     ))
 
 
@@ -140,10 +160,8 @@ def get_instruments(base_url: str, inst_type: str, inst_id: str,
         "instType": inst_type,
         "instId": inst_id,
     })
-    return _parse(requests.get(
-        base_url + request_path,
-        headers=_public_headers(simulated),
-        timeout=10,
+    return _parse(_get_with_retry(
+        base_url + request_path, _public_headers(simulated), 10,
     ))
 
 
@@ -259,7 +277,7 @@ def get_leaderboard(base_url: str, api_key: str, secret_key: str, passphrase: st
     })
     body = ""
     headers = _headers(api_key, secret_key, passphrase, "GET", request_path, body, simulated)
-    return _parse(requests.get(base_url + request_path, headers=headers, timeout=10))
+    return _parse(_get_with_retry(base_url + request_path, headers, 10))
 
 
 def get_trader_positions(base_url: str, api_key: str, secret_key: str, passphrase: str,
@@ -271,7 +289,7 @@ def get_trader_positions(base_url: str, api_key: str, secret_key: str, passphras
     })
     body = ""
     headers = _headers(api_key, secret_key, passphrase, "GET", request_path, body, simulated)
-    return _parse(requests.get(base_url + request_path, headers=headers, timeout=10))
+    return _parse(_get_with_retry(base_url + request_path, headers, 10))
 
 
 def get_trader_positions_history(base_url: str, api_key: str, secret_key: str, passphrase: str,
@@ -287,4 +305,4 @@ def get_trader_positions_history(base_url: str, api_key: str, secret_key: str, p
     })
     body = ""
     headers = _headers(api_key, secret_key, passphrase, "GET", request_path, body, simulated)
-    return _parse(requests.get(base_url + request_path, headers=headers, timeout=10))
+    return _parse(_get_with_retry(base_url + request_path, headers, 10))

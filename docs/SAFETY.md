@@ -122,11 +122,35 @@ an earlier version recorded a "position" even when OKX rejected the order
 (e.g. lot-size errors), silently corrupting the bot's own risk-tracking state.
 
 The strategy loop also treats missing/empty market data (e.g. an instrument
-not listed in demo trading) as a per-delta skip, not a crash — and wraps each
-delta's processing in a catch-all so one unexpected error can't take down a
-long-running process. All of this was found and fixed via a real live run,
-not anticipated in advance — see the conversation history for specifics if
-you're debugging something similar.
+not listed in demo trading, or one that flat-out doesn't exist — some Smart
+Money position data references instIds that aren't currently tradable) as a
+per-delta skip, not a crash — and wraps every network call in the poll loop
+(equity fetch, per-trader position poll, and the per-delta mirror itself) in
+a catch-all, so a transient error (a dropped SSL connection killed an earlier
+run entirely) can't take down a long-running process. All of this was found
+and fixed via real live runs, not anticipated in advance.
+
+Two layers handle a dropped connection now: `client.py`'s read-only GET calls
+(`_get_with_retry`) retry a dropped connection or timeout up to 3 times with a
+short backoff before giving up, so one blip doesn't cost a full
+`--poll-interval` wait; the per-cycle catch-all above is the outer net for
+whatever still gets through (retries exhausted, or a non-connection error).
+**`place_order` and `close_position` are never auto-retried** — both are POST
+calls, and retrying one whose response was lost to a dropped connection risks
+placing the same real-money order twice; a failure there is left to the
+catch-all, which skips the delta rather than guessing whether it went through.
+
+## `posSide` — never copy it from the source trader (see `pos_side_for`)
+
+A source trader's position data reports posSide from *their* account, which
+may be in a different OKX position mode (`net_mode` vs `long_short_mode`)
+than *yours*. An earlier version forwarded their raw `posSide` straight into
+this bot's own orders — on a live run, this caused OKX error `51000
+"Parameter posSide error"` on nearly every mirrored trade, because the
+runner's account was in a different mode than several tracked traders'
+accounts. `posSide` on every order this bot places is now derived from
+*this account's own* `posMode` (read once via `get_account_config` at
+startup) plus the mirror direction — never from the source trader's data.
 
 ## Risk controls this bot applies (see `risk.py`)
 
