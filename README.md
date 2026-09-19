@@ -32,8 +32,8 @@ via ordinary spot/swap orders.
 Requires Python ≥ 3.10.
 
 ```bash
-git clone <this-repo-url>
-cd smartmoney-bot
+git clone https://github.com/muhammad-wei/okx-smartmoney-bot.git
+cd okx-smartmoney-bot
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
