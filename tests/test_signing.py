@@ -83,7 +83,7 @@ def test_place_order_rejects_missing_ai_builder_code():
 
 
 def test_ai_builder_code_format_validation():
-    assert client._require_ai_builder_code("b97b2fd73aaaABDE") == "b97b2fd73aaaABDE"
+    assert client._require_ai_builder_code("53461cb5b603ABDE") == "53461cb5b603ABDE"
     for bad in ("", "has-a-dash", "x" * 17, "<AI_BUILDER_CODE>"):
         try:
             client._require_ai_builder_code(bad)

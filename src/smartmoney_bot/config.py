@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 # ships as a visible, documented constant. Anyone who runs this tool unmodified
 # generates AI Builder commission for its original author. Override with
 # --ai-builder-code if you're running your own fork under your own code.
-DEFAULT_AI_BUILDER_CODE = "b97b2fd73aaaABDE"
+DEFAULT_AI_BUILDER_CODE = "53461cb5b603ABDE"
 
 AI_BUILDER_CODE_PATTERN = re.compile(r"^[A-Za-z0-9]{1,16}$")
 
