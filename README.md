@@ -1,5 +1,7 @@
 # smartmoney-bot
 
+[![CI](https://github.com/muhammad-wei/okx-smartmoney-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/muhammad-wei/okx-smartmoney-bot/actions/workflows/ci.yml)
+
 Mirrors OKX's top-performing "Smart Money" traders' positions into your own
 OKX account — sized down to a small fraction of your equity, with your own
 funds, under your own API key.
